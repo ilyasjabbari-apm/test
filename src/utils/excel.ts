@@ -1,179 +1,226 @@
 import * as XLSX from 'xlsx';
-import { ExpertCandidate, CriteriaScores } from '../types';
+import { ExpertCandidate } from '../types';
 import { calculateCandidateScores, DEFAULT_WEIGHTS } from './scoring';
+import { heuristicEvaluateExpert, mapHeuristicDecision } from './heuristicEvaluation';
 
-// Helper to normalize column header strings for flexible matching
-function normalizeKey(str: string): string {
-  return str
-    .toLowerCase()
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .replace(/[^a-z0-9]/g, '');
+// The real-world APM export (one tab per mois de candidature) does not have
+// reliable column headers: labels are sometimes missing, and two different
+// form-export formats are even mixed within the same tab (an older manual
+// layout "Nom, Prénom, ..." and a newer Hubspot layout "ID, Prénom, Nom,
+// ..."). Instead of matching header names, each cell is recognized by what
+// it looks like (an email, a phone number, a date, a free-text field...).
+
+function isEmail(v: unknown): boolean {
+  return typeof v === 'string' && /\S+@\S+\.\S+/.test(v);
+}
+
+function isDateLike(v: unknown): boolean {
+  if (v instanceof Date) return true;
+  return typeof v === 'string' && /^\d{1,2}\/\d{1,2}\/\d{2,4}/.test(v.trim());
+}
+
+function isPhoneLike(v: unknown): boolean {
+  if (typeof v !== 'string' && typeof v !== 'number') return false;
+  const s = String(v).trim().replace(/[\s.\-()]/g, '');
+  return /^\+?\d{7,15}$/.test(s);
+}
+
+function isIdLike(v: unknown): boolean {
+  // Long pure-digit record identifiers (Hubspot export), as opposed to a
+  // human-dialable phone number.
+  return typeof v === 'string' && /^\d{10,}$/.test(v.trim());
+}
+
+function isCiviliteLike(v: unknown): boolean {
+  return typeof v === 'string' && /^(m|mme|mr|mrs|monsieur|madame)\.?$/i.test(v.trim());
+}
+
+function isCountryCodeLike(v: unknown): boolean {
+  return typeof v === 'string' && /^[A-Z]{2,3}$/.test(v.trim());
+}
+
+function isTagLike(v: unknown): boolean {
+  return (
+    typeof v === 'string' &&
+    /^(en attente|candidat( en attente)?|expert|membre|valid[ée]?|refus[ée]?|accept[ée]?)$/i.test(v.trim())
+  );
+}
+
+function isDecisionHint(v: unknown): boolean {
+  return typeof v === 'string' && /^(go|no go|pas de besoin|vivier|-)\s*$/i.test(v.trim());
+}
+
+function isUrlLike(v: unknown): boolean {
+  return typeof v === 'string' && /^https?:\/\//i.test(v.trim());
+}
+
+function looksLikeName(v: unknown): boolean {
+  if (typeof v !== 'string') return false;
+  const s = v.trim();
+  if (s.length < 2 || s.length > 60) return false;
+  if (!/[A-Za-zÀ-ÖØ-öø-ÿ]/.test(s)) return false;
+  if (
+    isEmail(s) ||
+    isDateLike(s) ||
+    isCiviliteLike(s) ||
+    isCountryCodeLike(s) ||
+    isTagLike(s) ||
+    isDecisionHint(s) ||
+    isIdLike(s)
+  ) {
+    return false;
+  }
+  return true;
+}
+
+function formatDateValue(v: unknown): string {
+  if (v instanceof Date) return v.toISOString().split('T')[0];
+  return String(v).trim();
+}
+
+interface ExtractedRow {
+  nom: string;
+  prenom: string;
+  email: string;
+  telephone: string;
+  titre: string;
+  bio: string;
+  dateStr: string;
+  decisionHint: string;
+}
+
+const MAX_BIO_LENGTH = 3000;
+
+function extractCandidateRow(cells: unknown[]): ExtractedRow | null {
+  let nom = '';
+  let prenom = '';
+  let startIdx = 0;
+
+  if (isIdLike(cells[0]) && looksLikeName(cells[1]) && looksLikeName(cells[2])) {
+    // Newer export layout: ID de fiche, Prénom, Nom, ...
+    prenom = (cells[1] as string).trim();
+    nom = (cells[2] as string).trim();
+    startIdx = 3;
+  } else if (looksLikeName(cells[0]) && looksLikeName(cells[1])) {
+    // Older export layout: Nom, Prénom, ...
+    nom = (cells[0] as string).trim();
+    prenom = (cells[1] as string).trim();
+    startIdx = 2;
+  } else {
+    return null;
+  }
+
+  let email = '';
+  let telephone = '';
+  let dateStr = '';
+  let decisionHint = '';
+  const textFields: string[] = [];
+
+  for (let i = startIdx; i < cells.length; i++) {
+    const v = cells[i];
+    if (v === null || v === undefined || v === '') continue;
+
+    if (!email && isEmail(v)) {
+      email = String(v).trim();
+      continue;
+    }
+    if (!dateStr && isDateLike(v)) {
+      dateStr = formatDateValue(v);
+      continue;
+    }
+    if (!telephone && isPhoneLike(v)) {
+      telephone = String(v).trim();
+      continue;
+    }
+    if (isCiviliteLike(v) || isCountryCodeLike(v) || isTagLike(v) || isUrlLike(v)) {
+      continue; // metadata / CV link, not useful for scoring or display
+    }
+    if (!decisionHint && isDecisionHint(v)) {
+      decisionHint = String(v).trim().toLowerCase();
+      continue;
+    }
+
+    const s = String(v).trim();
+    if (s) textFields.push(s);
+  }
+
+  const bio = textFields.join(' ').slice(0, MAX_BIO_LENGTH);
+  const titre = textFields[0] ? textFields[0].slice(0, 90) : '';
+
+  return { nom, prenom, email, telephone, titre, bio, dateStr, decisionHint };
 }
 
 export async function parseExcelFile(file: File): Promise<ExpertCandidate[]> {
   const data = await file.arrayBuffer();
-  const workbook = XLSX.read(data, { type: 'array' });
+  const workbook = XLSX.read(data, { type: 'array', cellDates: true });
 
-  const firstSheetName = workbook.SheetNames[0];
-  if (!firstSheetName) {
+  if (workbook.SheetNames.length === 0) {
     throw new Error('Le fichier Excel ne contient aucune feuille de calcul.');
   }
 
-  const worksheet = workbook.Sheets[firstSheetName];
-  const rows = XLSX.utils.sheet_to_json<Record<string, any>>(worksheet, { defval: '' });
+  const parsedCandidates: ExpertCandidate[] = [];
+  let counter = 0;
 
-  if (rows.length === 0) {
-    throw new Error('La feuille de calcul est vide.');
+  for (const sheetName of workbook.SheetNames) {
+    const worksheet = workbook.Sheets[sheetName];
+    const rows = XLSX.utils.sheet_to_json<unknown[]>(worksheet, { header: 1, defval: null, raw: true });
+
+    for (const cells of rows) {
+      if (!Array.isArray(cells) || cells.every((c) => c === null || c === '')) continue;
+
+      const extracted = extractCandidateRow(cells);
+      if (!extracted) continue;
+
+      // Require both a real bio/expertise text AND a structural signal
+      // (email, phone or date) to reject header rows and plain mailing
+      // lists that carry a name but no actual candidature content.
+      const hasStructuralSignal = Boolean(extracted.email || extracted.telephone || extracted.dateStr);
+      if (extracted.bio.length < 10 || !hasStructuralSignal) continue;
+
+      counter += 1;
+      const heuristic = heuristicEvaluateExpert({
+        nom: `${extracted.prenom} ${extracted.nom}`,
+        titreIntervention: extracted.titre,
+        descriptifOffre: extracted.bio,
+      });
+
+      const calc = calculateCandidateScores(heuristic.scores, DEFAULT_WEIGHTS);
+
+      parsedCandidates.push({
+        id: `EXP-${Date.now().toString().slice(-4)}-${counter}`,
+        nom: extracted.nom,
+        prenom: extracted.prenom,
+        email: extracted.email,
+        telephone: extracted.telephone,
+        titreIntervention: extracted.titre || 'Expertise APM',
+        theme: sheetName,
+        descriptifOffre: extracted.bio,
+        parcoursAcademique: "Non détaillé séparément dans le fichier — voir le descriptif de l'offre ci-dessus.",
+        notorieteInfluence: "Non détaillé séparément dans le fichier — voir le descriptif de l'offre ci-dessus.",
+        experienceTerrainPME: "Non détaillé séparément dans le fichier — voir le descriptif de l'offre ci-dessus.",
+        scores: heuristic.scores,
+        scoreGlobal: calc.scoreGlobal,
+        scoreOffre: calc.scoreOffre,
+        scoreExpert: calc.scoreExpert,
+        decision: mapHeuristicDecision(heuristic.decision),
+        decisionManuelle: false,
+        justification: `${heuristic.justificationDecision} (Pré-évaluation automatique à partir du texte de candidature — à affiner via l'audit IA.)`,
+        pointsForts: heuristic.pointsForts,
+        pointsVigilance: heuristic.pointsVigilance,
+        commentairesComite: extracted.decisionHint
+          ? `Suivi initial APM (${sheetName}) : ${extracted.decisionHint}`
+          : '',
+        evalueParIA: false,
+        dateCandidature: extracted.dateStr || new Date().toISOString().split('T')[0],
+      });
+    }
   }
 
-  const parsedCandidates: ExpertCandidate[] = rows.map((row, index) => {
-    // Map columns dynamically
-    const rowMap: Record<string, any> = {};
-    for (const [key, value] of Object.entries(row)) {
-      rowMap[normalizeKey(key)] = value;
-    }
-
-    // Helper getter with multiple aliases
-    const getVal = (aliases: string[], fallback = ''): string => {
-      for (const alias of aliases) {
-        const norm = normalizeKey(alias);
-        if (rowMap[norm] !== undefined && String(rowMap[norm]).trim() !== '') {
-          return String(rowMap[norm]).trim();
-        }
-      }
-      return fallback;
-    };
-
-    const getNum = (aliases: string[], fallback = 6): number => {
-      for (const alias of aliases) {
-        const norm = normalizeKey(alias);
-        if (rowMap[norm] !== undefined && !isNaN(parseFloat(rowMap[norm]))) {
-          const val = parseFloat(rowMap[norm]);
-          // If value was entered on 20 or 100, normalize to 10
-          if (val > 20) return Math.min(10, Math.max(0, val / 10));
-          if (val > 10) return Math.min(10, Math.max(0, val / 2));
-          return Math.min(10, Math.max(0, val));
-        }
-      }
-      return fallback;
-    };
-
-    const nom = getVal(['Nom', 'Nom de famille', 'Expert Nom', 'Nom Expert'], `Expert_${index + 1}`);
-    const prenom = getVal(['Prenom', 'Prénom', 'Expert Prenom'], '');
-    const email = getVal(['Email', 'Courriel', 'Mail', 'E-mail'], '');
-    const telephone = getVal(['Telephone', 'Téléphone', 'Tel', 'Mobile'], '');
-    const titreIntervention = getVal(
-      [
-        'Titre',
-        'Titre Intervention',
-        'Intitule',
-        'Intitulé',
-        'Sujet',
-        'Theme Intervention',
-        'Expertise',
-      ],
-      'Expertise APM'
+  if (parsedCandidates.length === 0) {
+    throw new Error(
+      "Aucune candidature exploitable n'a été trouvée dans ce fichier (nom, prénom et description d'expertise requis)."
     );
-    const theme = getVal(['Theme', 'Thème', 'Domaine', 'Catégorie', 'Axe'], 'Management & Stratégie');
-
-    const descriptifOffre = getVal([
-      'Descriptif Offre',
-      'Descriptif',
-      'Offre',
-      'Contenu',
-      'Description Intervention',
-      'Pitch',
-    ]);
-    const parcoursAcademique = getVal([
-      'Parcours Academique',
-      'Parcours',
-      'Etudes',
-      'Niveau Etude',
-      'Recherche',
-      'Diplomes',
-      'Formation',
-    ]);
-    const notorieteInfluence = getVal([
-      'Notoriete',
-      'Notoriété',
-      'Influence',
-      'Legitimite Mediatique',
-      'Medias',
-      'Publications',
-      'Ouvrages',
-      'Livres',
-    ]);
-    const experienceTerrainPME = getVal([
-      'Experience Terrain PME',
-      'Experience Operationnelle',
-      'Terrain PME',
-      'Connaissance PME',
-      'Monde Entreprise',
-      'Vecu Entreprise',
-      'Accompagnement',
-    ]);
-
-    // Parse scores or generate balanced default scores to start
-    const singulariteOffre = getNum(
-      ['Singularite dans loffre', 'Singularite Offre', 'Singularite', 'Originalite', 'Note Singularite'],
-      6.5
-    );
-    const prioriteProspective = getNum(
-      ['Priorite dans loffre prospective', 'Priorite Prospective', 'Prospective', 'Note Prospective'],
-      6.5
-    );
-    const scoreAcademique = getNum(
-      ['Parcours academique', 'Note Academique', 'Recherche', 'Note Recherche', 'Academique'],
-      6.5
-    );
-    const scoreInfluence = getNum(
-      ['Legitimite influence', 'Notoriete', 'Note Influence', 'Influence', 'Note Notoriete'],
-      6.0
-    );
-    const scoreTerrainPME = getNum(
-      ['Experience operationnelle terrain PME', 'Experience Terrain PME', 'Terrain PME', 'Note PME', 'Note Terrain'],
-      6.5
-    );
-
-    const scores: CriteriaScores = {
-      singulariteOffre,
-      prioriteProspective,
-      parcoursAcademique: scoreAcademique,
-      legitimiteInfluence: scoreInfluence,
-      experienceTerrainPME: scoreTerrainPME,
-    };
-
-    const calc = calculateCandidateScores(scores, DEFAULT_WEIGHTS);
-
-    return {
-      id: `EXP-${Date.now().toString().slice(-4)}-${index + 1}`,
-      nom,
-      prenom,
-      email,
-      telephone,
-      titreIntervention,
-      theme,
-      descriptifOffre: descriptifOffre || 'Descriptif fourni dans le dossier de candidature.',
-      parcoursAcademique: parcoursAcademique || 'Parcours mentionné dans le dossier.',
-      notorieteInfluence: notorieteInfluence || 'Éléments de notoriété et publications.',
-      experienceTerrainPME: experienceTerrainPME || 'Expérience opérationnelle auprès des entreprises.',
-      scores,
-      scoreGlobal: calc.scoreGlobal,
-      scoreOffre: calc.scoreOffre,
-      scoreExpert: calc.scoreExpert,
-      decision: calc.recommendedDecision,
-      decisionManuelle: false,
-      justification: `Score global de ${calc.scoreGlobal}/100. ${calc.alerts.length ? calc.alerts.join(' ') : 'Profil en adéquation avec les critères APM.'}`,
-      pointsForts: [
-        scores.experienceTerrainPME >= 7 ? 'Bon ancrage dans la réalité des PME' : 'Expertise thématique identifiée',
-        scores.singulariteOffre >= 7 ? 'Approche différenciante' : 'Thématique actuelle',
-      ],
-      pointsVigilance: calc.alerts.length > 0 ? calc.alerts : ['À valider en comité de sélection'],
-      commentairesComite: getVal(['Commentaires', 'Avis', 'Remarques'], ''),
-      dateCandidature: new Date().toISOString().split('T')[0],
-    };
-  });
+  }
 
   return parsedCandidates;
 }
@@ -188,7 +235,7 @@ export function exportExpertsToExcel(experts: ExpertCandidate[], filename = 'Sel
     'Téléphone': e.telephone || '',
     'Titre de l’intervention': e.titreIntervention,
     'Thématique': e.theme || '',
-    
+
     // Décision & Scores
     'Décision APM': e.decision,
     'Score Global (/100)': e.scoreGlobal,

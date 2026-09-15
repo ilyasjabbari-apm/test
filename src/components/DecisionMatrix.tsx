@@ -379,14 +379,17 @@ export const DecisionMatrix: React.FC<DecisionMatrixProps> = ({
                   className="filter drop-shadow-xs"
                 />
 
-                {/* Label near circle */}
-                <text
-                  x={x + 10}
-                  y={y - 8}
-                  className="text-[11px] font-bold fill-slate-900 pointer-events-none drop-shadow-xs"
-                >
-                  {candidate.prenom ? `${candidate.prenom[0]}. ` : ''}{candidate.nom}
-                </text>
+                {/* Label near circle — only shown for selected/hovered dot to
+                    keep the matrix readable once dozens of candidates are plotted */}
+                {(isSelected || isHovered) && (
+                  <text
+                    x={x + 10}
+                    y={y - 8}
+                    className="text-[11px] font-bold fill-slate-900 pointer-events-none drop-shadow-xs"
+                  >
+                    {candidate.prenom ? `${candidate.prenom[0]}. ` : ''}{candidate.nom}
+                  </text>
+                )}
               </g>
             );
           })}

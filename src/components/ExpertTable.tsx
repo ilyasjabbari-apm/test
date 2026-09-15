@@ -29,6 +29,8 @@ export const ExpertTable: React.FC<ExpertTableProps> = ({
   const [statusFilter, setStatusFilter] = useState<string>('ALL');
   const [sortField, setSortField] = useState<SortField>('scoreGlobal');
   const [sortAsc, setSortAsc] = useState(false);
+  const [page, setPage] = useState(0);
+  const PAGE_SIZE = 25;
 
   // Filter
   const filtered = candidates.filter((c) => {
@@ -68,6 +70,10 @@ export const ExpertTable: React.FC<ExpertTableProps> = ({
     return sortAsc ? diff : -diff;
   });
 
+  const pageCount = Math.max(1, Math.ceil(sorted.length / PAGE_SIZE));
+  const currentPage = Math.min(page, pageCount - 1);
+  const paginated = sorted.slice(currentPage * PAGE_SIZE, currentPage * PAGE_SIZE + PAGE_SIZE);
+
   const toggleSort = (field: SortField) => {
     if (sortField === field) {
       setSortAsc(!sortAsc);
@@ -75,6 +81,7 @@ export const ExpertTable: React.FC<ExpertTableProps> = ({
       setSortField(field);
       setSortAsc(false);
     }
+    setPage(0);
   };
 
   const getDecisionBadge = (status: DecisionStatus) => {
@@ -127,7 +134,10 @@ export const ExpertTable: React.FC<ExpertTableProps> = ({
             type="text"
             placeholder="Rechercher par nom, sujet, thématique ou mot-clé..."
             value={searchTerm}
-            onChange={(e) => setSearchTerm(e.target.value)}
+            onChange={(e) => {
+              setSearchTerm(e.target.value);
+              setPage(0);
+            }}
             className="w-full pl-9 pr-4 py-2 text-xs rounded-xl bg-slate-50 border border-slate-200 focus:outline-hidden focus:ring-2 focus:ring-amber-500 focus:bg-white text-slate-800 placeholder-slate-400"
           />
         </div>
@@ -143,7 +153,10 @@ export const ExpertTable: React.FC<ExpertTableProps> = ({
           ].map((tab) => (
             <button
               key={tab.id}
-              onClick={() => setStatusFilter(tab.id)}
+              onClick={() => {
+                setStatusFilter(tab.id);
+                setPage(0);
+              }}
               className={`px-3 py-1.5 text-xs font-semibold rounded-lg whitespace-nowrap transition-colors ${
                 statusFilter === tab.id
                   ? 'bg-slate-900 text-white shadow-xs'
@@ -198,21 +211,21 @@ export const ExpertTable: React.FC<ExpertTableProps> = ({
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-100">
-            {sorted.length === 0 ? (
+            {paginated.length === 0 ? (
               <tr>
                 <td colSpan={9} className="py-12 text-center text-slate-400 text-sm">
                   Aucun dossier ne correspond à vos critères de recherche.
                 </td>
               </tr>
             ) : (
-              sorted.map((expert, idx) => (
+              paginated.map((expert, idx) => (
                 <tr
                   key={expert.id}
                   className="hover:bg-amber-50/30 transition-colors group cursor-pointer"
                   onClick={() => onSelectCandidate(expert)}
                 >
                   <td className="py-3.5 px-4 text-center text-slate-400 font-mono text-[11px]">
-                    {idx + 1}
+                    {currentPage * PAGE_SIZE + idx + 1}
                   </td>
                   <td className="py-3.5 px-4">
                     <div className="font-bold text-slate-900 group-hover:text-amber-800 text-sm transition-colors">
@@ -295,6 +308,34 @@ export const ExpertTable: React.FC<ExpertTableProps> = ({
           </tbody>
         </table>
       </div>
+
+      {/* Pagination */}
+      {sorted.length > PAGE_SIZE && (
+        <div className="flex items-center justify-between gap-3 px-4 sm:px-5 py-3 border-t border-slate-200 text-xs">
+          <span className="text-slate-500">
+            {currentPage * PAGE_SIZE + 1}–{Math.min(sorted.length, (currentPage + 1) * PAGE_SIZE)} sur {sorted.length}
+          </span>
+          <div className="flex items-center gap-1.5">
+            <button
+              onClick={() => setPage((p) => Math.max(0, p - 1))}
+              disabled={currentPage === 0}
+              className="px-3 py-1.5 rounded-lg font-semibold bg-slate-100 text-slate-700 hover:bg-slate-200 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+            >
+              Précédent
+            </button>
+            <span className="text-slate-500 px-1">
+              Page {currentPage + 1} / {pageCount}
+            </span>
+            <button
+              onClick={() => setPage((p) => Math.min(pageCount - 1, p + 1))}
+              disabled={currentPage >= pageCount - 1}
+              className="px-3 py-1.5 rounded-lg font-semibold bg-slate-100 text-slate-700 hover:bg-slate-200 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+            >
+              Suivant
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

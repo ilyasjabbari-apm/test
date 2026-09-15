@@ -1,0 +1,6 @@
+{
+  "name": "APM - Sélection & Décision Candidatures Experts",
+  "description": "Outil d'aide à la décision pour le traitement et l'évaluation des candidatures d'experts APM à partir de fichiers Excel selon les critères d'offre et de profil.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
